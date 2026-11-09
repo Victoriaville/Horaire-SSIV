@@ -181,17 +181,169 @@ Valeur par défaut de `telegram_required` : `true` oblige tous les non-administr
 
 Le nom d'utilisateur du bot n'est pas écrit dans le code : il est lu avec `getBotInfo()` (appel Telegram `getMe`) pour créer le lien `https://t.me/<bot>?start=<CODE>`.
 
-## 6. Ordre d'exécution recommandé
+## 6. Plan Mini de restauration fiable
 
-1. Faire une copie de sécurité de la base (branche Neon ou export).
-2. Exécuter la migration SQL de la section 4.3.
-3. Restaurer les 13 fichiers supprimés (section 3.1) avec `git checkout 3833283 -- <chemins>`.
-4. Restaurer les 8 fichiers directs (section 3.2) après vérification du diff.
-5. Fusionner à la main les 3 fichiers de la section 3.3.
-6. Compiler (`pnpm build`) et corriger les erreurs de types éventuelles.
-7. Déployer en production (le webhook doit pointer vers une URL publique, pas vers la prévisualisation).
-8. Enregistrer le webhook : ouvrir la page `/dashboard/settings/telegram-webhook` (administrateur) et utiliser le bouton de configuration, qui appelle `/api/telegram/setup-webhook`. Vérifier que l'état affiche l'URL correcte et aucune erreur récente.
-9. Tester (section 7).
+La restauration doit être faite en petites étapes indépendantes. On ne passe à l'étape suivante que si la vérification de l'étape courante est réussie. Chaque étape doit être validée avant toute modification suivante.
+
+### Mini-étape 0 — Geler le point de départ
+
+**Objectif :** pouvoir revenir exactement à l'état actuel.
+
+1. Vérifier la branche et l'état Git.
+2. Ne pas commencer si des modifications non liées à Telegram sont présentes sans les identifier.
+3. Noter le commit courant.
+4. Créer un point de restauration Git avant toute modification.
+
+**Validation obligatoire :** l'état de départ est documenté et le retour arrière est possible.
+
+### Mini-étape 1 — Vérifier le code source historique
+
+**Objectif :** confirmer que la dernière version complète est exploitable.
+
+1. Lire les 13 fichiers Telegram depuis `3833283`.
+2. Comparer les fichiers concernés avec les versions actuelles.
+3. Vérifier que les imports utilisés par Telegram existent encore dans le projet.
+4. Vérifier les changements récents dans `middleware.ts`, `app/dashboard/layout.tsx` et `components/assigned-replacements-tab.tsx`.
+
+**Ne rien modifier.**
+
+**Validation obligatoire :** la liste des fichiers à restaurer et des fichiers à fusionner est confirmée.
+
+### Mini-étape 2 — Sauvegarder la base de données
+
+**Objectif :** protéger les données actuelles avant toute migration.
+
+1. Créer une branche ou une sauvegarde Neon.
+2. Vérifier que la sauvegarde contient les tables actuelles.
+3. Ne pas tenter de récupérer les anciens `telegram_chat_id`, conformément à la décision prise.
+
+**Validation obligatoire :** la sauvegarde est accessible et son identifiant est noté dans le journal de restauration.
+
+### Mini-étape 3 — Restaurer uniquement le schéma SQL
+
+**Objectif :** remettre les éléments nécessaires avant de charger le code.
+
+1. Exécuter la migration idempotente de la section 4.3.
+2. Utiliser `telegram_required = false` au départ pour ne pas forcer tous les utilisateurs.
+3. Ne pas exécuter `020-sync-telegram-preferences.sql`.
+4. Vérifier les colonnes `telegram_chat_id`, `enable_telegram` et `telegram_required`.
+5. Vérifier la table `telegram_link_codes`, ses clés étrangères et ses index.
+6. Vérifier la valeur d'audit `telegram_requirement_changed`.
+
+**Validation obligatoire :** toutes les structures existent et aucune donnée existante n'a été supprimée ou modifiée de façon inattendue.
+
+### Mini-étape 4 — Restaurer les fichiers Telegram autonomes
+
+**Objectif :** remettre les fonctions de base sans encore reconnecter toute l'interface.
+
+Restaurer les fichiers de la section 3.1, par petits groupes :
+
+1. `lib/telegram.ts`;
+2. les actions Telegram;
+3. les routes `/api/telegram/*`;
+4. les composants Telegram;
+5. les pages de statut et de webhook;
+6. le script de configuration du webhook.
+
+Après chaque groupe :
+
+- vérifier les imports;
+- rechercher les chemins inexistants;
+- lancer le type-check ciblé ou le build si nécessaire;
+- corriger uniquement les erreurs de ce groupe.
+
+**Validation obligatoire :** les actions et routes Telegram sont compilables avant de restaurer les notifications.
+
+### Mini-étape 5 — Restaurer les notifications
+
+**Objectif :** réintégrer Telegram sans casser les autres canaux.
+
+Restaurer les fichiers de la section 3.2 dans cet ordre :
+
+1. `app/actions/notifications.tsx`;
+2. `app/actions/send-manual-notification.ts`;
+3. `app/actions/send-assignment-notification.tsx`;
+4. `components/notification-preferences-form.tsx`;
+5. `components/send-notification-form.tsx`;
+6. `app/dashboard/page.tsx`;
+7. `app/dashboard/settings/page.tsx`;
+8. `app/dashboard/settings/notification-history/[id]/page.tsx`.
+
+Après chaque groupe, vérifier que les notifications internes et les courriels restent fonctionnels. Ne pas restaurer les anciennes versions si le diff contient un changement récent qui n'est pas lié à Telegram.
+
+**Validation obligatoire :** aucune erreur TypeScript et aucun canal non-Telegram n'est perdu.
+
+### Mini-étape 6 — Fusionner les fichiers sensibles
+
+**Objectif :** réintégrer Telegram sans écraser les corrections récentes.
+
+1. Dans `middleware.ts`, ajouter seulement l'exception du webhook et l'exclusion correspondante du matcher.
+2. Dans `app/dashboard/layout.tsx`, ajouter seulement le statut Telegram, la bannière et le modal.
+3. Dans `components/assigned-replacements-tab.tsx`, conserver `formatConfirmationChannel` et ajouter uniquement le cas `telegram` s'il manque.
+4. Relire le diff de ces trois fichiers.
+
+**Validation obligatoire :** les redirections, la session Edge, le mot de passe forcé et les changements de remplacements sont toujours présents.
+
+### Mini-étape 7 — Vérification statique complète
+
+**Objectif :** trouver les erreurs avant tout déploiement.
+
+1. Lancer le type-check.
+2. Lancer le lint si le projet le permet.
+3. Lancer le build de production.
+4. Vérifier les imports serveur/client et les routes API.
+5. Vérifier qu'aucun ancien secret ou jeton Telegram n'est écrit en dur.
+6. Vérifier que `TELEGRAM_BOT_TOKEN` est lu uniquement côté serveur.
+
+**Validation obligatoire :** type-check, lint et build réussissent, ou chaque exception est documentée avant de continuer.
+
+### Mini-étape 8 — Vérification de l'interface
+
+**Objectif :** vérifier les parcours visibles avant de configurer le webhook.
+
+Tester dans la prévisualisation ou l'environnement de test :
+
+1. page des préférences de notification;
+2. génération du lien Telegram;
+3. page des connexions Telegram administrateur;
+4. page de configuration du webhook;
+5. historique des notifications;
+6. affichage des remplacements confirmés par Telegram.
+
+**Validation obligatoire :** aucune page ne produit d'erreur console ou serveur liée à Telegram.
+
+### Mini-étape 9 — Déploiement et webhook
+
+**Objectif :** connecter Telegram uniquement après validation du code.
+
+1. Déployer la version validée.
+2. Vérifier que l'URL publique est celle de production.
+3. Configurer le webhook depuis `/dashboard/settings/telegram-webhook`.
+4. Vérifier la réponse Telegram et l'URL enregistrée.
+5. Vérifier que Telegram ne reçoit pas de redirection 307 vers `/login`.
+
+**Validation obligatoire :** le webhook est actif et répond avec un statut HTTP réussi.
+
+### Mini-étape 10 — Tests fonctionnels par scénarios
+
+**Objectif :** valider toutes les fonctions, pas seulement la compilation.
+
+Faire les tests de la section 7 dans l'ordre. Utiliser un compte de test et relier manuellement son compte Telegram, puisque les anciens chat IDs ne sont pas restaurés.
+
+**Validation obligatoire :** chaque scénario est noté comme réussi ou bloqué avec la cause exacte.
+
+### Mini-étape 11 — Nettoyage et clôture
+
+**Objectif :** laisser une restauration propre et reproductible.
+
+1. Retirer les logs de diagnostic temporaires.
+2. Vérifier que les migrations ne sont pas dupliquées.
+3. Vérifier le diff final.
+4. Mettre à jour ce document si une étape réelle diffère.
+5. Créer un commit dédié à la restauration Telegram.
+6. Conserver l'identifiant de la sauvegarde et les résultats des tests.
+
+**Règle d'arrêt :** si une étape échoue, on s'arrête, on conserve les résultats, on corrige uniquement la cause identifiée et on ne passe pas à l'étape suivante sans nouvelle validation.
 
 ## 7. Tests de validation
 
