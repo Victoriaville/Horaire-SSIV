@@ -187,14 +187,25 @@ La restauration doit être faite en petites étapes indépendantes. On ne passe 
 
 ### Mini-étape 0 — Geler le point de départ
 
-**Objectif :** pouvoir revenir exactement à l'état actuel.
+**Objectif :** pouvoir revenir exactement à l'état actuel, qui est considéré comme l'état fonctionnel de référence.
 
 1. Vérifier la branche et l'état Git.
 2. Ne pas commencer si des modifications non liées à Telegram sont présentes sans les identifier.
-3. Noter le commit courant.
-4. Créer un point de restauration Git avant toute modification.
+3. Noter le commit courant sous le nom `BASELINE_COMMIT`.
+4. Créer une branche Git de sauvegarde immuable, par exemple `backup/avant-restauration-telegram`.
+5. Ne jamais modifier, rebaser ou supprimer cette branche pendant la restauration.
+6. Conserver une copie du diff initial et de l'état des variables nécessaires.
+7. Faire un contrôle de référence : démarrage, connexion, tableau de bord, remplacements, notifications, journal d'activités et mot de passe forcé.
 
-**Validation obligatoire :** l'état de départ est documenté et le retour arrière est possible.
+**Validation obligatoire :**
+
+- `BASELINE_COMMIT` est noté;
+- la branche de sauvegarde existe;
+- l'état Git initial est propre ou les modifications sont listées;
+- les parcours critiques actuels fonctionnent;
+- un retour vers `BASELINE_COMMIT` a été identifié et n'exige pas de modifier `main`.
+
+**Point de retour code :** en cas d'échec, arrêter immédiatement et revenir à `BASELINE_COMMIT` ou à la branche `backup/avant-restauration-telegram`. Ne jamais corriger en continu sur un état partiellement restauré.
 
 ### Mini-étape 1 — Vérifier le code source historique
 
@@ -211,13 +222,25 @@ La restauration doit être faite en petites étapes indépendantes. On ne passe 
 
 ### Mini-étape 2 — Sauvegarder la base de données
 
-**Objectif :** protéger les données actuelles avant toute migration.
+**Objectif :** protéger les données actuelles avant toute migration SQL.
 
-1. Créer une branche ou une sauvegarde Neon.
-2. Vérifier que la sauvegarde contient les tables actuelles.
-3. Ne pas tenter de récupérer les anciens `telegram_chat_id`, conformément à la décision prise.
+1. Créer une branche ou une sauvegarde Neon dédiée, par exemple `avant-restauration-telegram`.
+2. Ne jamais exécuter de migration sur cette sauvegarde.
+3. Vérifier qu'elle contient les tables actuelles et les données récentes.
+4. Noter son identifiant, sa date et sa base d'origine dans le journal de restauration.
+5. Conserver cette sauvegarde intacte pendant toute la restauration et toute la période de validation.
+6. Ne pas tenter de récupérer les anciens `telegram_chat_id`, conformément à la décision prise.
+7. Ne pas supprimer les anciennes tables ou colonnes actuelles pendant la restauration; la migration doit être additive.
 
-**Validation obligatoire :** la sauvegarde est accessible et son identifiant est noté dans le journal de restauration.
+**Validation obligatoire :**
+
+- la sauvegarde Neon est accessible;
+- son identifiant est noté;
+- une vérification de tables et de données a réussi;
+- la sauvegarde n'est pas la base utilisée par l'application;
+- aucune commande destructive n'a été exécutée.
+
+**Règle importante :** le retour arrière du code est immédiat, mais le retour arrière SQL peut supprimer des données créées après la migration. On ne restaure donc pas toute la base par défaut; on conserve la sauvegarde comme référence et on corrige les ajouts Telegram de façon ciblée.
 
 ### Mini-étape 3 — Restaurer uniquement le schéma SQL
 
@@ -364,6 +387,62 @@ Faire les tests de la section 7 dans l'ordre. Utiliser un compte de test et reli
 - Si la protection de déploiement Vercel bloque le webhook, vérifier `VERCEL_AUTOMATION_BYPASS_SECRET` et réenregistrer le webhook.
 - Si un fichier restauré a changé depuis cette rédaction, refaire la comparaison de la section 3.2 avant de l'écraser.
 
-## 9. Annulation (retour à l'état sans Telegram)
+## 9. Procédure de retour à l'état 100 % fonctionnel
 
-Réexécuter `scripts/024-remove-telegram-from-database.sql`, puis supprimer les fichiers restaurés ou rétablir les versions précédentes de Git (`git checkout <commit-avant-restauration> -- <fichiers>`).
+L'état de référence est celui de `BASELINE_COMMIT` et de la branche Neon sauvegardée à la Mini-étape 2.
+
+### 9.1 Si le problème concerne seulement le code
+
+1. Arrêter la restauration et ne pas exécuter d'autre migration.
+2. Désactiver le webhook Telegram si la version déployée le reçoit déjà.
+3. Revenir à `BASELINE_COMMIT` ou redéployer la branche `backup/avant-restauration-telegram`.
+4. Vérifier les parcours critiques : connexion, tableau de bord, remplacements, notifications, journal d'activités et mot de passe forcé.
+5. Ne pas supprimer les nouvelles structures Telegram de la base : elles sont inutilisées et leur suppression risquerait d'effacer des données de liaison créées pendant les tests.
+
+### 9.2 Si une migration SQL a échoué avant toute utilisation
+
+1. Arrêter immédiatement la restauration.
+2. Lire l'erreur et vérifier si une partie de la migration a déjà été appliquée.
+3. Ne pas relancer aveuglément le script.
+4. Vérifier les colonnes et tables avec les requêtes de la section 4.
+5. Corriger uniquement l'étape SQL manquante, ou laisser les éléments ajoutés en place s'ils sont corrects.
+6. Revenir au code de référence si nécessaire.
+
+### 9.3 Si des données ont été modifiées après la migration
+
+1. Ne pas restaurer toute la base Neon par-dessus la base active.
+2. Conserver la base active et la sauvegarde intactes.
+3. Comparer les données entre les deux branches.
+4. Restaurer uniquement les lignes concernées après validation.
+5. Si une restauration complète est indispensable, arrêter l'application, faire une nouvelle sauvegarde de l'état courant, puis obtenir une validation explicite avant toute opération destructive.
+
+### 9.4 Annulation complète de Telegram après validation
+
+Seulement si l'on décide définitivement de retirer Telegram :
+
+1. Désactiver le webhook Telegram.
+2. Revenir au commit de référence du code.
+3. Vérifier que les notifications internes et courriels fonctionnent.
+4. Faire une sauvegarde de la base active avant suppression.
+5. Exécuter `scripts/024-remove-telegram-from-database.sql` une seule fois.
+6. Vérifier que les colonnes et la table ont été supprimées.
+7. Conserver la sauvegarde Neon et le commit Telegram séparément pour une restauration ultérieure.
+
+**Interdiction :** ne jamais utiliser un `git revert` global ni exécuter le script 024 pendant la restauration de Telegram. Le script 024 est uniquement une procédure de retrait complet.
+
+## 10. Journal obligatoire de restauration
+
+Avant de commencer, consigner dans ce document ou dans un journal associé :
+
+- `BASELINE_COMMIT`;
+- branche Git de sauvegarde;
+- identifiant de la sauvegarde ou branche Neon;
+- date et heure de la sauvegarde;
+- résultat des contrôles de référence;
+- migrations exécutées et heure d'exécution;
+- résultat de chaque validation Mini;
+- URL de production utilisée pour le webhook;
+- résultat des tests Telegram;
+- identifiant du commit final.
+
+Aucune étape ne doit être considérée comme terminée si son résultat n'est pas consigné.
